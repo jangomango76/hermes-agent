@@ -1,0 +1,87 @@
+name: Runtime probe revision verification
+run-name: Runtime probes ${{ github.sha }}
+
+on:
+  push:
+    branches: ['verify/103786-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-probes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Runtime probes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Record tested tree and host
+        run: |
+          git rev-parse HEAD HEAD^{tree}
+          node -p 'JSON.stringify({platform:process.platform,arch:process.arch})'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          cache: npm
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: '0.9.28'
+          enable-cache: true
+      - name: Electron system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
+      - name: Locked Node dependencies
+        run: |
+          npm install --global npm@12.0.2
+          npm --version
+          npm ci
+      - name: Locked Python runtime
+        run: uv sync --locked --python 3.11 --extra all --extra dev
+      - name: Native interpreter selection
+        run: |
+          python -c "import os,pathlib,subprocess; p=(pathlib.Path('.venv') / ('Scripts/python.exe' if os.name=='nt' else 'bin/python')).absolute(); subprocess.run([str(p),'-c','import yaml, dotenv, hermes_cli.config; import sys; print(sys.prefix)'],check=True); open(os.environ['GITHUB_ENV'],'a',encoding='utf-8').write('HERMES_DESKTOP_PYTHON='+str(p)+'\n')"
+      - name: Focused runtime and lifecycle contracts
+        working-directory: apps/desktop
+        run: npm run test:desktop:platforms -- electron/backend-probes electron/backend-claim electron/backend-serve-support electron/primary-backend-startup electron/windows-hermes-path electron/backend-connection-state electron/backend-command --maxWorkers=2
+      - name: Typecheck
+        working-directory: apps/desktop
+        run: npm run typecheck
+      - name: Build the actual Desktop
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Real Electron runtime regression and boot
+        working-directory: apps/desktop
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npx playwright test e2e/runtime-probe e2e/boot.spec.ts --grep-invert screenshot --workers=1 --retries=0 --reporter=list
+          else
+            npx playwright test e2e/runtime-probe e2e/boot.spec.ts --grep-invert screenshot --workers=1 --retries=0 --reporter=list
+          fi
+      - name: Upload execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-probes-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            apps/desktop/test-results/
+            apps/desktop/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
