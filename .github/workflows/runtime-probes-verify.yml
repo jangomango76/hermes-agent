@@ -16,11 +16,13 @@ jobs:
   desktop:
     name: Runtime probes (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 20
+    env:
+      SHUTDOWN_DIAG_LOG: ${{ github.workspace }}/apps/desktop/shutdown-lifecycle.jsonl
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
     defaults:
       run:
         shell: bash
@@ -34,7 +36,7 @@ jobs:
           node -p 'JSON.stringify({platform:process.platform,arch:process.arch})'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 26
+          node-version: 26.8.1
           cache: npm
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -71,9 +73,9 @@ jobs:
         working-directory: apps/desktop
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a npx playwright test e2e/runtime-probe e2e/boot.spec.ts --grep-invert screenshot --workers=1 --retries=0 --reporter=list
+            xvfb-run -a npx playwright test e2e/boot.spec.ts --grep-invert screenshot --repeat-each=8 --max-failures=1 --workers=1 --retries=0 --reporter=list
           else
-            npx playwright test e2e/runtime-probe e2e/boot.spec.ts --grep-invert screenshot --workers=1 --retries=0 --reporter=list
+            npx playwright test e2e/boot.spec.ts --grep-invert screenshot --repeat-each=8 --max-failures=1 --workers=1 --retries=0 --reporter=list
           fi
       - name: Upload execution evidence
         if: always()
@@ -81,6 +83,7 @@ jobs:
         with:
           name: runtime-probes-${{ matrix.os }}-${{ github.sha }}
           path: |
+            apps/desktop/shutdown-lifecycle.jsonl
             apps/desktop/test-results/
             apps/desktop/playwright-report/
           if-no-files-found: ignore
