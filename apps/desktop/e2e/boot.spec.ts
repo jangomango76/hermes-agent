@@ -24,6 +24,27 @@ let fixture: MockBackendFixture | null = null
 
 test.beforeAll(async () => {
   fixture = await setupMockBackend()
+  await fixture.app.evaluate(async ({ app, BrowserWindow }, logPath) => {
+    const fs = process.getBuiltinModule('node:fs')
+    const record = (event: string, detail: unknown = null) => {
+      const handles = (process as unknown as { _getActiveHandles(): { constructor: {name: string}; pid?: number; exitCode?: number }[] })._getActiveHandles()
+      fs.appendFileSync(logPath, JSON.stringify({time: Date.now(), pid: process.pid, event, detail,
+        windows: BrowserWindow.getAllWindows().map((w: {id: number; isDestroyed(): boolean}) => ({id:w.id,destroyed:w.isDestroyed()})),
+        handles: handles.map(h=>({type:h.constructor.name,pid:h.pid,exitCode:h.exitCode}))})+'\n')
+    }
+    record('installed')
+    for (const event of ['before-quit','will-quit','quit','window-all-closed'] as const) {
+      app.on(event, (e: { defaultPrevented?: boolean }) => record(event, {prevented:e?.defaultPrevented}))
+    }
+    for (const win of BrowserWindow.getAllWindows()) {
+      for (const event of ['close','closed','unresponsive','responsive'] as const) {
+        win.on(event, (e: {defaultPrevented?: boolean}) => record('window.'+event,{prevented:e?.defaultPrevented}))
+      }
+      win.webContents.on('will-prevent-unload', ()=>record('will-prevent-unload'))
+      win.webContents.on('render-process-gone', (_e: unknown,d: unknown)=>record('render-process-gone',d))
+    }
+  }, process.env.SHUTDOWN_DIAG_LOG!)
+
 })
 
 test.afterAll(async () => {
