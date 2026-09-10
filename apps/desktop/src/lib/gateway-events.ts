@@ -41,7 +41,11 @@ export const UNSCOPED_STREAM_EVENT_TYPES = new Set([
   'tool.complete',
   'tool.generating',
   'tool.progress',
-  'tool.start'
+  'tool.start',
+  'vault.save_login.expire',
+  'vault.save_login.request',
+  'vault.unlock.expire',
+  'vault.unlock.request'
 ])
 
 const UNSCOPED_STREAM_END_EVENT_TYPES = new Set(['error', 'message.complete'])
