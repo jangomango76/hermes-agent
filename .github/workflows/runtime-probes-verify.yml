@@ -1,0 +1,63 @@
+name: P1 runtime probe exact-head native verification
+run-name: Runtime probes ${{ github.sha }}
+
+on:
+  push:
+    branches: ['verify/103786-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-probes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Record tested source and host
+        run: |
+          git rev-parse HEAD HEAD^{tree} HEAD^
+          node -p 'JSON.stringify({platform:process.platform,arch:process.arch})'
+          git diff --name-status HEAD^ HEAD
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          cache: npm
+      - name: Electron system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
+      - name: Locked dependencies
+        run: |
+          npm install --global npm@12.0.2
+          npm --version
+          npm ci
+      - name: Full Electron Vitest project
+        working-directory: apps/desktop
+        run: npm run test:desktop:platforms
+      - name: Typecheck
+        working-directory: apps/desktop
+        run: npm run typecheck
+      - name: Lint
+        working-directory: apps/desktop
+        run: npm run lint
+      - name: Build the actual Desktop
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Repository diff check
+        run: git diff --check HEAD^ HEAD
