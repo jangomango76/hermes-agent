@@ -1,0 +1,297 @@
+# Diagnostic overlay only: publish as .github/workflows/gateway-runtime-verify.yml
+# on verify/108837-* with exactly one parent: the final, restacked source SHA.
+# No baseline exceptions: the candidate itself must be GREEN. Historical bridge
+# RED evidence is not rerun here; source and integration are now the same tree.
+# Syntax validation is not native execution; zero jobs/action_required is not PASS.
+name: PR 108837 final native verification
+run-name: PR 108837 native ${{ github.sha }}
+'on':
+  push:
+    branches: ['verify/108837-*']
+permissions:
+  contents: read
+concurrency:
+  group: final-native-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+env:
+  EXPECTED_SOURCE_SHA: 'f03711ce5d4beaaa6977739ba27fbccaa36e44ba'
+  EXPECTED_SOURCE_TREE: '6ed6e93fe2560ef1ebd238cd38b007683ffcc06d'
+  EXPECTED_BASE_SHA: '280cf2df2f0fa2d8fc18e96eec61ddf3141c8285'
+  EXPECTED_INTEGRATION_TREE: '6ed6e93fe2560ef1ebd238cd38b007683ffcc06d'
+jobs:
+  desktop:
+    name: Final native contracts (${{ matrix.os }})
+    if: github.repository == 'jangomango76/hermes-agent'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      HERMES_HOME: ${{ runner.temp }}/gateway-verification-home
+      TZ: UTC
+      LANG: C.UTF-8
+      PYTHONNOUSERSITE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Reject a non-source-preserving overlay
+      run: |
+        test "$(git rev-parse HEAD^)" = "$EXPECTED_SOURCE_SHA"
+        test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/gateway-runtime-verify.yml'
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: 26
+        cache: npm
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.12'
+    - name: Prove exact source, base ancestry and integration tree
+      run: |
+        node <<'JS'
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const {execFileSync} = require('node:child_process');
+        const git = (...args) => execFileSync('git', args, {encoding:'utf8'}).trim();
+        const source = process.env.EXPECTED_SOURCE_SHA;
+        const base = process.env.EXPECTED_BASE_SHA;
+        const expectedTree = process.env.EXPECTED_SOURCE_TREE;
+        const expectedIntegration = process.env.EXPECTED_INTEGRATION_TREE;
+        for (const value of [source, base, expectedTree, expectedIntegration]) assert.match(value, /^[0-9a-f]{40}$/);
+        const overlay = git('rev-parse', 'HEAD');
+        assert.equal(overlay, process.env.GITHUB_SHA);
+        assert.deepEqual(git('rev-list', '--parents', '-n', '1', overlay).split(' '), [overlay, source]);
+        assert.equal(git('diff', '--name-only', source, overlay), '.github/workflows/gateway-runtime-verify.yml');
+        git('diff', '--check', source, overlay);
+        git('diff', '--exit-code', 'HEAD');
+        assert.equal(git('rev-parse', source+'^{tree}'), expectedTree);
+        git('cat-file', '-e', base+'^{commit}');
+        git('merge-base', '--is-ancestor', base, source);
+        assert.equal(git('merge-base', base, source), base);
+        assert.equal(expectedIntegration, expectedTree, 'Restacked source must already be the integration tree');
+        assert.equal(git('merge-tree', '--write-tree', base, source).split(/\r?\n/)[0], expectedIntegration);
+        const root = path.join(process.env.RUNNER_TEMP, 'gateway-source');
+        git('worktree', 'add', '--detach', root, source);
+        assert.equal(git('-C', root, 'rev-parse', 'HEAD'), source);
+        assert.equal(git('-C', root, 'rev-parse', 'HEAD^{tree}'), expectedIntegration);
+        const receipt = {source, base, sourceTree:expectedTree, integrationTree:expectedIntegration, overlay, overlayTree:git('rev-parse','HEAD^{tree}'), root, platform:process.platform};
+        fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'SOURCE-tree.json'), JSON.stringify(receipt,null,2));
+        console.log('EXACT_TREE_RECEIPT '+JSON.stringify(receipt));
+        JS
+    - name: Pin the authoritative Node 26, npm 12 and Python 3.12 toolchain
+      working-directory: ${{ runner.temp }}/gateway-source
+      run: |
+        npm install --global npm@12.0.2
+        python -m pip install PyYAML==6.0.3
+        python <<'PY'
+        import json, os, pathlib, sys
+        import yaml
+        from gateway.runtime_contract import RuntimeState
+        assert sys.version_info[:2] == (3, 12)
+        assert yaml.__version__ == '6.0.3'
+        pathlib.Path(os.environ['HERMES_HOME']).mkdir(parents=True, exist_ok=True)
+        # Keep the lexical executable: realpath can lose a venv's site-packages.
+        with pathlib.Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as out:
+            out.write('HERMES_TEST_PYTHON=' + sys.executable + '\n')
+        print(json.dumps({'python':sys.version, 'executable':sys.executable, 'yaml':yaml.__version__}))
+        PY
+        node --version
+        npm --version
+        node -e "require('node:assert/strict').equal(process.versions.node.split('.')[0], '26')"
+    - name: Python fixture environment preflight
+      run: |
+        node <<'JS'
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const os = require('node:os');
+        const path = require('node:path');
+        const {spawnSync} = require('node:child_process');
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'python-preflight-'));
+        const env = Object.fromEntries(['PATH','Path','SystemRoot','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP'].filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
+        Object.assign(env, {HOME:home, USERPROFILE:home, HERMES_HOME:home, PYTHONPATH:home, PYTHONNOUSERSITE:'1', HERMES_TEST_PYTHON:process.env.HERMES_TEST_PYTHON});
+        try {
+          assert(env.HERMES_TEST_PYTHON);
+          const probes = [env.HERMES_TEST_PYTHON,'python3','python'].map(command => {
+            const r = spawnSync(command, ['-c','import sys; print(sys.executable)'], {env, timeout:10000, encoding:'utf8', windowsHide:true});
+            return {command, status:r.status, signal:r.signal, error:r.error?.code, stdout:r.stdout, stderr:r.stderr};
+          });
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'SOURCE-python-preflight.json'),JSON.stringify(probes,null,2));
+          console.log(JSON.stringify(probes));
+          assert(probes[0].status === 0 && !probes[0].signal && !probes[0].error && probes[0].stdout.trim());
+          assert(probes.slice(1).some(p => p.status === 0 && p.stdout.trim()));
+        } finally { fs.rmSync(home, {recursive:true, force:true}); }
+        JS
+    - name: Linux native desktop prerequisites
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64 xvfb xauth
+    - name: Install and prove source-local workspace dependencies
+      id: dependencies
+      working-directory: ${{ runner.temp }}/gateway-source
+      run: |
+        npm ci
+        node <<'JS'
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const {execFileSync} = require('node:child_process');
+        const root = fs.realpathSync(process.cwd());
+        const manifest = JSON.parse(fs.readFileSync('package.json','utf8'));
+        assert(Array.isArray(manifest.workspaces) && manifest.workspaces.length > 0);
+        const declared = fs.globSync(manifest.workspaces).filter(p => fs.existsSync(path.join(p,'package.json'))).map(p => fs.realpathSync(p)).sort();
+        const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+        const rows = JSON.parse(execFileSync(command,['query','.workspace'],{shell:process.platform === 'win32',encoding:'utf8'}));
+        const resolved = rows.map(row => {
+          const actual = fs.realpathSync(path.resolve(root,row.location));
+          const relative = path.relative(root,actual);
+          assert(relative && relative !== '..' && !relative.startsWith('..'+path.sep) && !path.isAbsolute(relative),'Workspace escaped source: '+row.location);
+          assert.equal(actual,fs.realpathSync(row.realpath));
+          return actual;
+        }).sort();
+        assert(resolved.length > 0);
+        assert.deepEqual(resolved,declared);
+        execFileSync('git',['diff','--exit-code','HEAD'],{stdio:'pipe'});
+        const tree = execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
+        assert.equal(tree,process.env.EXPECTED_SOURCE_TREE);
+        const receipt = {root,tree,workspaces:rows.map(row => row.location)};
+        fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'SOURCE-workspace-scope.json'),JSON.stringify(receipt,null,2));
+        console.log('WORKSPACE_SCOPE_RECEIPT '+JSON.stringify(receipt));
+        JS
+    - name: Native core, gateway integration, affected SDK and full Electron receipts
+      run: |
+        node <<'JS'
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const {spawnSync} = require('node:child_process');
+        const root = path.join(process.env.RUNNER_TEMP,'gateway-source');
+        const cwd = path.join(root,'apps/desktop');
+        const core = ['backend-probes','backend-claim','backend-connection-state','windows-hermes-path','primary-backend-startup','primary-backend-cancellation','local-backend-lifecycle','first-run-setup-main-process','backend-command','backend-descriptor-cache','oauth-rest-request','oauth-auth-recovery.integration','gateway-download-transport','gateway-file-download','gateway-file-download.fs','quit-teardown'].map(n => 'electron/'+n+'.test.ts');
+        const nativeName = 'native HTTP mints fresh purpose-bound grants without browser credentials';
+        const bridgeName = 'Python ticket bridge pins profile, owner, protocol and purpose';
+        const suites = [
+          ['core','test:desktop:platforms',core],
+          ['gateway','test:desktop:platforms',['electron/local-gateway.test.ts','electron/local-gateway-python.test.ts']],
+          ['affected-sdk','test:ui',['src/sdk/index.test.ts']],
+          ['full-electron','test:desktop:platforms',[]]
+        ];
+        const failures = [];
+        for (const [label,script,files] of suites) {
+          const prefix = path.join(process.env.RUNNER_TEMP,'SOURCE-'+label);
+          const reportFile = prefix+'.json';
+          fs.rmSync(reportFile,{force:true});
+          const args = ['run',script,'--',...files,'--maxWorkers=2','--testTimeout=35000','--reporter=default','--reporter=json','--outputFile.json='+reportFile];
+          // Preserve product budgets; only outlive the existing 30s PowerShell cold-start probe.
+          const r = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',args,{cwd,shell:process.platform === 'win32',encoding:'utf8',timeout:900000,maxBuffer:64*1024*1024});
+          fs.writeFileSync(prefix+'.stdout.log',r.stdout||'');
+          fs.writeFileSync(prefix+'.stderr.log',r.stderr||'');
+          const receipt = {label,platform:process.platform,args,status:r.status,signal:r.signal,error:r.error ? {code:r.error.code,message:r.error.message} : null};
+          fs.writeFileSync(prefix+'-process.json',JSON.stringify(receipt,null,2));
+          console.log('=== SOURCE '+label+' ===');
+          process.stdout.write(r.stdout||''); process.stderr.write(r.stderr||'');
+          try {
+            assert(!r.error && !r.signal && Number.isInteger(r.status),'HARNESS_BLOCKER: process did not finish normally');
+            assert(fs.existsSync(reportFile),'HARNESS_BLOCKER: missing JSON report');
+            const report = JSON.parse(fs.readFileSync(reportFile,'utf8'));
+            const assertions = report.testResults.flatMap(s => s.assertionResults);
+            const counts = assertions.reduce((a,v) => (a[v.status]=(a[v.status]||0)+1,a),{});
+            Object.assign(receipt,{total:assertions.length,counts,success:report.success,failures:assertions.filter(a => a.status === 'failed').map(a => a.fullName)});
+            fs.writeFileSync(prefix+'-receipt.json',JSON.stringify(receipt,null,2));
+            assert(!/Unhandled Errors|Unhandled Rejection|Uncaught Exception/i.test((r.stdout||'')+(r.stderr||'')),'HARNESS_BLOCKER: unhandled runner error');
+            assert.equal(report.numRuntimeErrorTestSuites||0,0,'HARNESS_BLOCKER: runtime error suites');
+            assert(assertions.length > 0,'HARNESS_BLOCKER: zero testcase records');
+            assert.equal(assertions.length,report.numTotalTests,'HARNESS_BLOCKER: total/record mismatch');
+            assert.equal(counts.passed||0,report.numPassedTests);
+            assert.equal(counts.failed||0,report.numFailedTests);
+            assert.equal(counts.skipped||0,report.numPendingTests);
+            assert.deepEqual(Object.keys(counts).filter(s => !['passed','failed','skipped'].includes(s)),[]);
+            assert((counts.passed||0) > 0,'All-skipped is not PASS');
+            if (files.length) {
+              assert.deepEqual(report.testResults.map(s => path.relative(cwd,s.name).split(path.sep).join('/')).sort(),[...files].sort(),'Requested test files must actually execute');
+            }
+            if (label === 'gateway') {
+              const expectedSkips = process.platform === 'win32' ? [nativeName,bridgeName].sort() : [];
+              assert.deepEqual(assertions.filter(a => a.status === 'skipped').map(a => a.fullName).sort(),expectedSkips);
+              for (const name of [nativeName,bridgeName]) {
+                const records = assertions.filter(a => a.fullName === name);
+                assert.equal(records.length,1);
+                assert.equal(records[0].status,process.platform === 'win32' ? 'skipped' : 'passed',name+' must be GREEN on native POSIX (including macOS canonical realpath fixture)');
+              }
+            }
+            assert.equal(r.status,0,label+' candidate process must pass; no baseline exception');
+            assert.equal(report.success,true);
+            assert.equal(counts.failed||0,0);
+            console.log('NATIVE_ASSERTION_RECEIPT '+JSON.stringify(receipt));
+          } catch (error) {
+            failures.push({label,message:error.message});
+            console.error(label+': '+error.message);
+          }
+        }
+        fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'SOURCE-native-outcome.json'),JSON.stringify({platform:process.platform,failures},null,2));
+        assert.deepEqual(failures,[],'Every native candidate suite is required');
+        JS
+    - name: Linux full workspace, typecheck, lint and build gates
+      if: ${{ !cancelled() && runner.os == 'Linux' && steps.dependencies.outcome == 'success' }}
+      env:
+        NODE_OPTIONS: --max-old-space-size=4096
+      run: |
+        node <<'JS'
+        const assert = require('node:assert/strict');
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const {spawnSync} = require('node:child_process');
+        const root = path.join(process.env.RUNNER_TEMP,'gateway-source');
+        const desktop = path.join(root,'apps/desktop');
+        // typecheck already includes renderer + Electron + e2e in this source.
+        // Workspace discovery and all check:* selections remain product-authoritative.
+        const gates = [
+          ['workspace-list','node',['.github/scripts/run-workspace-checks.mjs','--list'],root,60000],
+          ['workspace','xvfb-run',['-a','node','.github/scripts/run-workspace-checks.mjs','--concurrency','1'],root,2400000],
+          ['typecheck','npm',['run','typecheck'],desktop,600000],
+          ['lint','npm',['run','lint','--','--format','json'],desktop,600000],
+          ['build','npm',['run','build'],desktop,900000]
+        ];
+        const receipts = [];
+        for (const [gate,command,args,cwd,timeout] of gates) {
+          const prefix = path.join(process.env.RUNNER_TEMP,'SOURCE-'+gate);
+          const r = spawnSync(command,args,{cwd,env:process.env,encoding:'utf8',timeout,maxBuffer:128*1024*1024});
+          fs.writeFileSync(prefix+'.stdout.log',r.stdout||'');
+          fs.writeFileSync(prefix+'.stderr.log',r.stderr||'');
+          process.stdout.write(r.stdout||''); process.stderr.write(r.stderr||'');
+          const receipt = {gate,command,args,status:r.status,signal:r.signal,error:r.error ? {code:r.error.code,message:r.error.message} : null};
+          receipt.harnessBlocked = Boolean(r.error || r.signal || !Number.isInteger(r.status));
+          receipts.push(receipt);
+          fs.writeFileSync(prefix+'-process.json',JSON.stringify(receipt,null,2));
+          console.log('CANONICAL_GATE_PROCESS '+JSON.stringify(receipt));
+        }
+        fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'SOURCE-gates.json'),JSON.stringify(receipts,null,2));
+        assert.deepEqual(receipts.filter(r => r.harnessBlocked),[],'HARNESS_BLOCKER: unfinished/resource-failed gate; not a product verdict');
+        assert.deepEqual(receipts.filter(r => r.status !== 0),[],'Every canonical gate must exit zero; stdout is not exit status');
+        JS
+    - name: Prove source remained unchanged
+      if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+      run: |
+        git diff --exit-code HEAD
+        git diff --check HEAD^ HEAD
+        test "$(git -C "$RUNNER_TEMP/gateway-source" rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+        test "$(git -C "$RUNNER_TEMP/gateway-source" rev-parse HEAD^{tree})" = "$EXPECTED_SOURCE_TREE"
+        git -C "$RUNNER_TEMP/gateway-source" diff --exit-code HEAD
+        git -C "$RUNNER_TEMP/gateway-source" diff --check "$EXPECTED_BASE_SHA" HEAD
+    - name: Preserve exact-tree native evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: final-native-${{ runner.os }}-${{ github.sha }}
+        path: |
+          ${{ runner.temp }}/SOURCE-*.json
+          ${{ runner.temp }}/SOURCE-*.log
+        if-no-files-found: error
+        retention-days: 7
