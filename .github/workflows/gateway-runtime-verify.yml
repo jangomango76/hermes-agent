@@ -1,0 +1,166 @@
+name: Gateway companion native contracts and baseline
+run-name: Gateway companion ${{ github.sha }}
+
+on:
+  push:
+    branches: ['verify/105836-gateway-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-runtime-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  EXPECTED_SOURCE_SHA: '16bcde2a33a355433b78b61534838a7293251ee4'
+  EXPECTED_BASE_SHA: 'bda776074d11dd9b8c17a696c34608061565866d'
+
+jobs:
+  desktop:
+    name: Gateway contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact source parent and workflow-only delta
+        run: |
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_SOURCE_SHA"
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/gateway-runtime-verify.yml'
+          git rev-parse HEAD HEAD^{tree} HEAD^
+          git diff --name-status HEAD^ HEAD
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          cache: npm
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Electron system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
+      - name: Locked workspace dependencies
+        run: |
+          npm install --global npm@12.0.2
+          node --version
+          npm --version
+          python -c 'import sys; print(sys.executable)'
+          node -p 'JSON.stringify({platform:process.platform,arch:process.arch})'
+          npm ci
+      - name: Verify Python in the regression fixture environment
+        run: |
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const {spawnSync} = require('node:child_process');
+          const home = fs.mkdtempSync(path.join(os.tmpdir(), 'python-preflight-'));
+          const env = Object.fromEntries(['PATH','Path','SystemRoot','SYSTEMROOT','WINDIR','COMSPEC','TEMP','TMP'].filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
+          Object.assign(env, {HOME:home, USERPROFILE:home, HERMES_HOME:home, PYTHONPATH:home, PYTHONNOUSERSITE:'1'});
+          try {
+            const probes = ['python3','python'].map(command => {
+              const r = spawnSync(command, ['-c','import sys; print(sys.executable)'], {env, timeout:2000, encoding:'utf8', windowsHide:true});
+              return {command, status:r.status, signal:r.signal, error:r.error?.code, stdout:r.stdout, stderr:r.stderr};
+            });
+            console.log(JSON.stringify(probes));
+            assert(probes.some(p => p.status === 0 && p.stdout.trim()));
+          } finally { fs.rmSync(home, {recursive:true, force:true}); }
+          JS
+      - name: Prepare exact baseline with shared locked dependencies
+        run: |
+          git fetch --no-tags origin "$EXPECTED_BASE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/gateway-base" "$EXPECTED_BASE_SHA"
+          node <<'JS'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const base = path.join(process.env.RUNNER_TEMP, 'gateway-base');
+          for (const rel of ['node_modules', 'apps/desktop/node_modules']) {
+            const target = path.join(process.cwd(), rel);
+            if (fs.existsSync(target)) fs.symlinkSync(target, path.join(base, rel), process.platform === 'win32' ? 'junction' : 'dir');
+          }
+          JS
+      - name: Changed-path contracts on exact base and source
+        run: |
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const {spawnSync} = require('node:child_process');
+          const files = ['backend-probes','backend-claim','backend-connection-state','windows-hermes-path','primary-backend-startup','primary-backend-cancellation','local-backend-lifecycle','first-run-setup-main-process','backend-command','backend-descriptor-cache'].map(n => 'electron/'+n+'.test.ts');
+          for (const [label, root] of [['SOURCE',process.cwd()],['BASE',path.join(process.env.RUNNER_TEMP,'gateway-base')]]) {
+            console.log('=== '+label+' CHANGED-PATH CONTRACTS ===');
+            // The existing marker probe permits a 30s PowerShell cold start.
+            // The test harness must outlive that probe; product budgets are unchanged.
+            const reportFile = path.join(process.env.RUNNER_TEMP,label+'-core.json');
+            const r = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run','test:desktop:platforms','--',...files,'--maxWorkers=2','--testTimeout=35000','--reporter=default','--reporter=json','--outputFile.json='+reportFile], {cwd:path.join(root,'apps/desktop'), shell:process.platform === 'win32', encoding:'utf8', maxBuffer:16*1024*1024});
+            process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || '');
+            assert(!r.error, String(r.error));
+            assert(!/Unhandled Errors|Unhandled Rejection|Uncaught Exception/i.test((r.stdout||'')+(r.stderr||'')), 'Late runner errors are never baseline-accepted');
+            const report = JSON.parse(fs.readFileSync(reportFile,'utf8'));
+            const failed = report.testResults.flatMap(s => s.assertionResults.filter(a => a.status === 'failed'));
+            if (label === 'BASE' && process.platform === 'win32') {
+              // Reproduced on the exact base in run 34673864253; donor already fixes this path fixture.
+              assert.equal(r.status,1);
+              assert.equal(report.numFailedTests,1);
+              assert.equal(failed.length,1);
+              assert.equal(failed[0].fullName,'getVenvSitePackagesEntries: reads pyvenv.cfg version on POSIX and resolves lib/pythonX.Y/site-packages');
+              assert(failed[0].failureMessages.join('\n').includes('/venv/lib/python3.12/site-packages'));
+            } else {
+              assert.equal(r.status,0,label+' changed-path contracts must pass');
+              assert.equal(report.success,true);
+              assert.equal(failed.length,0);
+            }
+            console.log(JSON.stringify({label,total:report.numTotalTests,passed:report.numPassedTests,failed:report.numFailedTests,pending:report.numPendingTests,failures:failed.map(a => a.fullName)}));
+          }
+          JS
+      - name: Adjacent gateway baseline comparison (inherited failures remain visible)
+        run: |
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const {spawnSync} = require('node:child_process');
+          const reports = [];
+          for (const [label, root] of [['BASE',path.join(process.env.RUNNER_TEMP,'gateway-base')],['SOURCE',process.cwd()]]) {
+            const reportFile = path.join(process.env.RUNNER_TEMP, label+'-gateway.json');
+            console.log('=== '+label+' ADJACENT GATEWAY CONTRACTS ===');
+            const r = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run','test:desktop:platforms','--','electron/local-gateway.test.ts','electron/local-gateway-python.test.ts','--maxWorkers=2','--testTimeout=35000','--reporter=default','--reporter=json','--outputFile.json='+reportFile], {cwd:path.join(root,'apps/desktop'), shell:process.platform === 'win32', encoding:'utf8', maxBuffer:16*1024*1024});
+            process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || '');
+            assert(!r.error, String(r.error));
+            assert(!/Unhandled Errors|Unhandled Rejection|Uncaught Exception/i.test((r.stdout||'')+(r.stderr||'')), 'Late runner errors are never baseline-accepted');
+            const report = JSON.parse(fs.readFileSync(reportFile,'utf8'));
+            const failed = report.testResults.flatMap(s => s.assertionResults.filter(a => a.status === 'failed'));
+            if (r.status !== 0) {
+              assert.equal(process.platform,'darwin');
+              assert.equal(r.status,1);
+              assert.equal(report.numFailedTests,1);
+              assert.equal(failed.length,1);
+              assert(failed[0].fullName.includes('native HTTP mints fresh purpose-bound grants without browser credentials'));
+              assert(failed[0].failureMessages.join('\n').includes('Noncanonical gateway profile'));
+            } else {
+              assert.equal(failed.length,0);
+              assert.equal(report.success,true);
+            }
+            reports.push({label,total:report.numTotalTests,passed:report.numPassedTests,failed:report.numFailedTests,pending:report.numPendingTests,failures:failed.map(a => a.fullName)});
+          }
+          console.log(JSON.stringify(reports));
+          const [base, source] = reports.map(({label,...r}) => r);
+          assert.deepEqual(source,base,'No new failures, skipped tests, or changed counts in unchanged gateway contracts');
+          JS
+      - name: Repository diff check
+        run: |
+          git diff --exit-code
+          git diff --check HEAD^ HEAD
