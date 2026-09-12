@@ -1,0 +1,75 @@
+name: Gateway companion focused native contracts
+run-name: Gateway companion ${{ github.sha }}
+
+on:
+  push:
+    branches: ['verify/105836-gateway-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-runtime-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  EXPECTED_SOURCE_SHA: '16bcde2a33a355433b78b61534838a7293251ee4'
+
+jobs:
+  desktop:
+    name: Gateway contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact source parent and workflow-only delta
+        run: |
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_SOURCE_SHA"
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/gateway-runtime-verify.yml'
+          git rev-parse HEAD HEAD^{tree} HEAD^
+          git diff --name-status HEAD^ HEAD
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26
+          cache: npm
+      - name: Electron system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
+      - name: Locked workspace dependencies
+        run: |
+          npm install --global npm@12.0.2
+          node --version
+          npm --version
+          node -p 'JSON.stringify({platform:process.platform,arch:process.arch})'
+          npm ci
+      - name: Focused changed-path and gateway contracts
+        working-directory: apps/desktop
+        run: >-
+          npm run test:desktop:platforms --
+          electron/backend-probes.test.ts
+          electron/backend-claim.test.ts
+          electron/backend-connection-state.test.ts
+          electron/windows-hermes-path.test.ts
+          electron/primary-backend-startup.test.ts
+          electron/primary-backend-cancellation.test.ts
+          electron/local-backend-lifecycle.test.ts
+          electron/first-run-setup-main-process.test.ts
+          electron/local-gateway.test.ts
+          electron/local-gateway-python.test.ts
+          electron/backend-command.test.ts
+          electron/backend-descriptor-cache.test.ts
+          --maxWorkers=2
+      - name: Repository diff check
+        run: git diff --check HEAD^ HEAD
