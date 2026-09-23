@@ -131,7 +131,6 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
             from agent.auxiliary_client import resolve_provider_client
             destination, _resolved_model = resolve_provider_client(
                 parsed.provider, model=parsed.model, raw_codex=True,
-                explicit_base_url=parsed.base_url or None,
             )
             if destination is None:
                 raise ValueError("destination provider is not configured")
@@ -139,6 +138,11 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
             new_key = getattr(destination, "api_key", "") or ""
             if not resolved_base_url:
                 raise ValueError("destination provider has no endpoint")
+            # An explicit URL in plugin output is only an identity assertion, not a
+            # resolver override: composing a provider's key with an arbitrary URL
+            # would disclose that credential to a plugin-controlled host.
+            if parsed.base_url and parsed.base_url.rstrip("/") != resolved_base_url.rstrip("/"):
+                raise ValueError("destination endpoint differs from configured provider")
         from agent.agent_runtime_helpers import switch_model
         old_key = getattr(agent, "api_key", "")
         if crosses_endpoint:

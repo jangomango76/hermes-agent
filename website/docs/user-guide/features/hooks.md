@@ -420,8 +420,10 @@ The callback receives only `turn_id`, `task_id`, `session_id`, `platform`,
 a dict containing nonempty `model` and `provider` strings, optionally
 `base_url`, `api_mode`, and `reasoning_effort`. A configured destination
 provider/endpoint must resolve through Hermes's normal provider credentials;
-the plugin never supplies an API key. An omitted `base_url` uses the configured
-provider route, while a same-provider model switch keeps the current endpoint.
+the plugin never supplies an API key. An optional `base_url` must match the
+configured destination endpoint; it cannot redirect a provider credential to
+an arbitrary host. An omitted `base_url` uses the configured provider route,
+while a same-provider model switch keeps the current endpoint.
 Invalid or unresolvable decisions are ignored (the old route is used).
 
 The first non-`None` plugin result wins; later results cannot override it.
