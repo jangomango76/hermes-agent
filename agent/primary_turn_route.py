@@ -12,11 +12,47 @@ import copy
 import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
 _HOOK = "pre_primary_turn_route"
 _ALLOWED_API_MODES = frozenset({"chat_completions", "anthropic_messages", "codex_responses", "bedrock_converse"})
+
+
+@dataclass(frozen=True)
+class _HostRiskVerdict:
+    """Host-only classification; plugin output and prompt text are not authority."""
+
+    risk: str
+    verified: bool
+    provenance: str
+
+
+def _host_risk_verdict() -> _HostRiskVerdict | None:
+    """No trusted risk producer is wired to this isolated host yet."""
+    return None
+
+
+def _safe_endpoint_origin(base_url: Any) -> str | None:
+    """Expose only an HTTP(S) origin, never credentials, path, query or fragment."""
+    if not isinstance(base_url, str):
+        return None
+    try:
+        parsed = urlsplit(base_url)
+        host, port = parsed.hostname, parsed.port
+        if (parsed.scheme not in {"http", "https"} or not host
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or "?" in base_url or "#" in base_url
+                or not host.isascii() or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789.-:" for c in host.lower())):
+            return None
+        # urlsplit accepts whitespace and control characters; those are not safe identities.
+        if any(ord(c) <= 32 or ord(c) == 127 for c in base_url):
+            return None
+        hostname = f"[{host}]" if ":" in host else host
+        return f"{parsed.scheme}://{hostname}{f':{port}' if port is not None else ''}"
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -83,6 +119,24 @@ def _route_decision(value: Any) -> PrimaryTurnRouteDecision | None:
 
 def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, task_id: str) -> bool:
     """Apply one valid plugin route before request construction, or leave runtime untouched."""
+    # The host currently has no trusted risk producer. Do not even discover a
+    # plugin without an explicitly verified host verdict and a safe identity.
+    try:
+        verdict = _host_risk_verdict()
+    except Exception:
+        logger.warning("Host primary-turn risk verdict unavailable", exc_info=True)
+        return False
+    if (type(verdict) is not _HostRiskVerdict or verdict.verified is not True
+            or verdict.risk != "low" or not isinstance(verdict.provenance, str)
+            or not verdict.provenance.strip()):
+        return False
+    endpoint_origin = _safe_endpoint_origin(getattr(agent, "base_url", None))
+    if endpoint_origin is None:
+        return False
+    reasoning = getattr(agent, "reasoning_config", None)
+    original_effort = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
+    if original_effort is not None and not isinstance(original_effort, str):
+        return False
     try:
         from hermes_cli.plugins import has_hook, invoke_hook
         if not has_hook(_HOOK):
@@ -98,6 +152,9 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
                 "model": getattr(agent, "model", "") or "",
                 "provider": getattr(agent, "provider", "") or "",
                 "api_mode": getattr(agent, "api_mode", "") or "",
+                "original_effort": original_effort,
+                "endpoint_origin": endpoint_origin,
+                "risk": {"risk": verdict.risk, "verified": True, "provenance": verdict.provenance},
             },
         )
     except Exception:

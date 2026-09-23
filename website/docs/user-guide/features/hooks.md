@@ -414,9 +414,20 @@ def register(ctx):
     ctx.register_hook("pre_primary_turn_route", choose_route)
 ```
 
-The callback receives only `turn_id`, `task_id`, `session_id`, `platform`,
-`user_message`, and `current_route` (`model`, `provider`, `api_mode`). It does
-**not** receive a mutable agent or credential. Its return is either `None` or
+The callback is **not invoked** without a verified, low-risk host verdict.
+There is no trusted risk producer connected yet, so this hook currently leaves
+the original primary route untouched in production. A plugin's claim, prompt
+text, or agent attribute cannot supply a host verdict. The isolated test host
+uses an explicit test-only verdict to exercise the callback and restoration.
+
+When admitted, the callback receives only `turn_id`, `task_id`, `session_id`,
+`platform`, `user_message`, and `current_route` (`model`, `provider`, `api_mode`,
+`original_effort`, `endpoint_origin`, and `risk` with `risk`, `verified`, and
+`provenance`). `endpoint_origin` contains only the scheme, host and optional
+port; the host does not invoke plugins if its configured endpoint contains
+userinfo, a query, or a fragment. Path and credentials are never included in
+the route facts. The callback does **not** receive a mutable agent or API key.
+Its return is either `None` or
 a dict containing nonempty `model` and `provider` strings, optionally
 `base_url`, `api_mode`, and `reasoning_effort`. A configured destination
 provider/endpoint must resolve through Hermes's normal provider credentials;
@@ -495,7 +506,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
 | `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
-| `pre_primary_turn_route` | Directive/control | Once per user turn after its IDs are bound and before its first primary request; the first non-null result must be `{"model": str, "provider": str, "base_url"?: str, "api_mode"?: str, "reasoning_effort"?: str}`. The host validates it, performs the canonical temporary switch, applies effort after switching, records routed usage, and restores the original runtime after the turn. Invalid, failed, or timed-out decisions leave the current route unchanged; retries and tool-loop follow-ups do not invoke it again. | `turn_id`, `task_id`, `session_id`, `platform`, `user_message`, `current_route` (`model`, `provider`, `api_mode`) | User content is exposed; no live agent, client, API key, base URL, or other credential-bearing runtime object is provided. |
+| `pre_primary_turn_route` | Directive/control | Only with a verified low-risk host verdict and safe endpoint identity, once per user turn before its first primary request; no trusted risk producer is wired yet, so production does not invoke it. The first non-null result must be `{"model": str, "provider": str, "base_url"?: str, "api_mode"?: str, "reasoning_effort"?: str}`. The host validates it, temporarily switches and restores after the turn. Invalid, failed, or timed-out decisions leave the original route unchanged; retries and tool-loop follow-ups do not invoke it again. | `turn_id`, `task_id`, `session_id`, `platform`, `user_message`, `current_route` (`model`, `provider`, `api_mode`, `original_effort`, `endpoint_origin`, `risk` with explicit provenance) | User content is exposed; no live agent, client, API key, full base URL, or other credential-bearing runtime object is provided. |
 | `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |

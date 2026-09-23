@@ -186,6 +186,11 @@ def test_returns_turn_context_with_user_message_appended():
 
 def test_primary_turn_route_is_applied_before_runtime_publication_and_preflight(monkeypatch):
     """The routed model must drive the whole turn preflight, not only its API loop."""
+    from agent import primary_turn_route
+
+    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", lambda: primary_turn_route._HostRiskVerdict(
+        risk="low", verified=True, provenance="isolated-host-test-fixture",
+    ))
     agent = _FakeAgent()
     agent._primary_runtime = {"model": agent.model, "provider": agent.provider}
     agent.reasoning_config = {"enabled": True, "effort": "medium"}
@@ -211,6 +216,26 @@ def test_primary_turn_route_is_applied_before_runtime_publication_and_preflight(
     assert seen[0][0] == "hook"
     assert seen[0][1]
     assert seen[1] == ("published", "routed/model")
+
+
+def test_unverified_default_turn_never_discovers_router_plugin(monkeypatch):
+    """No production risk authority is installed by the test-only positive fixture."""
+    import hermes_cli.plugins as plugins_mod
+    from agent.primary_turn_route import _host_risk_verdict
+
+    assert _host_risk_verdict() is None
+    agent = _FakeAgent()
+    agent.reasoning_config = {"enabled": True, "effort": "high"}
+    original_has_hook = plugins_mod.has_hook
+    original_invoke_hook = plugins_mod.invoke_hook
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda hook: (
+        pytest.fail("router discovered") if hook == "pre_primary_turn_route" else original_has_hook(hook)
+    ))
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda hook, **kw: (
+        pytest.fail("router invoked") if hook == "pre_primary_turn_route" else original_invoke_hook(hook, **kw)
+    ))
+    _build(agent)
+    assert (agent.model, agent.reasoning_config["effort"]) == ("test/model", "high")
 
 
 def test_preflight_timeout_stops_turn_before_provider_boundary():

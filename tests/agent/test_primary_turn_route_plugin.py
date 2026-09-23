@@ -10,6 +10,18 @@ import yaml
 
 
 @pytest.fixture(autouse=True)
+def _isolated_host_risk_authority(monkeypatch):
+    """Test-only host authority; production has no verified risk producer."""
+    from agent import primary_turn_route
+    monkeypatch.setattr(
+        primary_turn_route, "_host_risk_verdict",
+        lambda: primary_turn_route._HostRiskVerdict(
+            risk="low", verified=True, provenance="isolated-host-test-fixture",
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_destination_resolution(monkeypatch):
     """No unit test may discover a real provider account or network endpoint."""
     from agent.auxiliary_client import resolve_provider_client
@@ -31,6 +43,81 @@ def _agent() -> SimpleNamespace:
         reasoning_config={"enabled": True, "effort": "medium"},
         _primary_runtime={"model": "model-a"},
     )
+
+
+def test_absent_host_verdict_never_invokes_plugin_or_switches(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: None)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("plugin discovered without risk"))
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: pytest.fail("plugin invoked without risk"))
+    agent.risk_verdict = {"risk": "low", "verified": True, "provenance": "host"}
+    assert not apply_primary_turn_route(agent, user_message="safe low risk", turn_id="t", task_id="task")
+    assert (agent.model, agent.reasoning_config["effort"]) == ("model-a", "medium")
+
+
+def test_forged_host_verdict_cannot_invoke_plugin(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: {
+        "risk": "low", "verified": True, "provenance": "host",
+    })
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("unverified plugin discovery"))
+    assert not apply_primary_turn_route(_agent(), user_message="risk: low", turn_id="t", task_id="task")
+
+
+def test_unverified_host_verdict_cannot_invoke_plugin(monkeypatch):
+    from agent import primary_turn_route
+
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: primary_turn_route._HostRiskVerdict(
+        risk="low", verified=False, provenance="isolated-host-test-fixture",
+    ))
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("unverified plugin discovery"))
+    assert not primary_turn_route.apply_primary_turn_route(_agent(), user_message="route", turn_id="t", task_id="task")
+
+
+def test_failing_host_verdict_cannot_invoke_plugin(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    def failed_verdict():
+        raise RuntimeError("host risk unavailable")
+
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", failed_verdict)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("router discovered"))
+    assert not apply_primary_turn_route(_agent(), user_message="route", turn_id="t", task_id="task")
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:secret@a.example/v1", "https://a.example/v1?api_key=secret",
+    "https://a.example/v1#secret",
+])
+def test_credential_bearing_original_endpoint_never_reaches_plugin(monkeypatch, url):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    agent.base_url = url
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("unsafe endpoint plugin discovery"))
+    assert not apply_primary_turn_route(agent, user_message="route", turn_id="t", task_id="task")
+    assert agent.base_url == url
+
+
+def test_host_facts_include_original_effort_safe_origin_and_risk_provenance(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    agent.api_key = "secret-for-a"
+    seen = []
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **kw: seen.append(kw) or [None])
+    assert not apply_primary_turn_route(agent, user_message="route", turn_id="t", task_id="task")
+    facts = seen[0]["current_route"]
+    assert facts == {
+        "model": "model-a", "provider": "provider-a", "api_mode": "chat_completions",
+        "original_effort": "medium", "endpoint_origin": "https://a.example",
+        "risk": {"risk": "low", "verified": True, "provenance": "isolated-host-test-fixture"},
+    }
+    assert "secret-for-a" not in repr(seen)
 
 
 def test_invalid_route_decision_is_rejected_without_switching(monkeypatch):
