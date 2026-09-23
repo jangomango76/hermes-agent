@@ -184,6 +184,35 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_primary_turn_route_is_applied_before_runtime_publication_and_preflight(monkeypatch):
+    """The routed model must drive the whole turn preflight, not only its API loop."""
+    agent = _FakeAgent()
+    agent._primary_runtime = {"model": agent.model, "provider": agent.provider}
+    agent.reasoning_config = {"enabled": True, "effort": "medium"}
+    seen = []
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda event: event == "pre_primary_turn_route")
+
+    def route(event, **kwargs):
+        seen.append(("hook", kwargs["turn_id"], kwargs["current_route"]["model"]))
+        return [{"model": "routed/model", "provider": "openrouter"}]
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", route)
+
+    def switch(fake_agent, **kwargs):
+        fake_agent.model = kwargs["new_model"]
+        fake_agent.provider = kwargs["new_provider"]
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", switch)
+    monkeypatch.setattr(
+        "agent.turn_context._publish_runtime_main",
+        lambda fake_agent: seen.append(("published", fake_agent.model)),
+    )
+    _build(agent)
+    assert seen[0][0] == "hook"
+    assert seen[0][1]
+    assert seen[1] == ("published", "routed/model")
+
+
 def test_preflight_timeout_stops_turn_before_provider_boundary():
     """An unchanged payload above the model window must not escape turn construction (a request that
     still fits its window is sent uncompressed instead — see test_preflight_compression_timeout_fail_closed)."""

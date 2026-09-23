@@ -116,6 +116,10 @@ VALID_HOOKS: Set[str] = {
     # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
     # going; anything else finishes. Bounded by agent.max_verify_nudges.
     "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
+    # pre_primary_turn_route: once after the turn identity is bound and before the first
+    # primary request. Plugins return one typed temporary route decision; the host owns
+    # validation, canonical switching, accounting, and restoration.
+    "pre_primary_turn_route",
     # pre/post_auxiliary_call: once per physical provider attempt of an auxiliary LLM call
     # (agent/auxiliary_hooks.py — titling, compression, MoA, vision, approval, ...). Same payload
     # shape as pre/post_api_request plus ``aux_task``; distinct events so turn-scoped

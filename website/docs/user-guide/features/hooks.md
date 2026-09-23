@@ -398,6 +398,41 @@ def register(ctx):
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
 - Runtime event-name validity comes from `hermes_cli.plugins.VALID_HOOKS`. `hermes hooks list` lists configured shell/outbound hooks, not every available event; `hermes hooks test <event>` reports the valid set only when an invalid event is supplied.
 
+### Pre-primary-turn routing
+
+`pre_primary_turn_route` is the supported plugin seam for choosing a **temporary**
+primary model before a user turn's prompt construction, compression preflight,
+and first primary request. Register it in a regular enabled Python plugin:
+
+```python
+def choose_route(*, user_message, current_route, turn_id, **kwargs):
+    if isinstance(user_message, str) and user_message.startswith("/research "):
+        return {"model": "research-model", "provider": "openrouter", "reasoning_effort": "high"}
+    return None  # Keep the configured primary route.
+
+def register(ctx):
+    ctx.register_hook("pre_primary_turn_route", choose_route)
+```
+
+The callback receives only `turn_id`, `task_id`, `session_id`, `platform`,
+`user_message`, and `current_route` (`model`, `provider`, `api_mode`). It does
+**not** receive a mutable agent or credential. Its return is either `None` or
+a dict containing nonempty `model` and `provider` strings, optionally
+`base_url`, `api_mode`, and `reasoning_effort`. A configured destination
+provider/endpoint must resolve through Hermes's normal provider credentials;
+the plugin never supplies an API key. An omitted `base_url` uses the configured
+provider route, while a same-provider model switch keeps the current endpoint.
+Invalid or unresolvable decisions are ignored (the old route is used).
+
+The first non-`None` plugin result wins; later results cannot override it.
+The callback is timeout-bounded by `plugins.hook_callback_timeout` and runs once
+per **user turn**, not on retries or tool-loop calls. Hermes applies model,
+transport, context window, and effort through the host switcher. The temporary
+route remains active for provider calls and usage accounting, then is restored
+even after an exception or interruption. A failed restore blocks the next turn
+rather than sending a request on a stale route. This changes the runtime route,
+not the persisted conversation history or a session's frozen system guidance.
+
 ### Cache-safe system prompt sections
 
 Plugins that need durable, always-on guidance can register a bounded system
@@ -454,6 +489,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `transform_terminal_output` | Transform | After bounded foreground process capture, before final output limiting; first string replaces output. | `command`, `output`, `returncode`, `task_id`, `env_type` | Command/output may contain credentials. |
 | `pre_transcription` | Transform | Fired by the STT dispatcher after provider resolution and before any backend (built-in, command-type, or plugin-registered) is invoked; dict results are applied in registration order, last-writer-wins per field (`prompt`, `language`, `model`; `file_path` is read-only). | `file_path`, `provider`, `model`, `language`, `prompt`, `source` | The final prompt is uploaded to the configured STT provider with the audio — keep secrets out of hook returns. |
 | `pre_llm_call` | Directive/control | Once per turn before the loop; all valid string/`{"context": ...}` returns are joined and injected into the user message. | `session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`, `parent_session_id`, `sender_id` | Full user message and conversation history. |
+| `pre_primary_turn_route` | Directive/control | Once per user turn after its IDs are bound and before its first primary request; the first non-null result must be `{"model": str, "provider": str, "base_url"?: str, "api_mode"?: str, "reasoning_effort"?: str}`. The host validates it, performs the canonical temporary switch, applies effort after switching, records routed usage, and restores the original runtime after the turn. Invalid, failed, or timed-out decisions leave the current route unchanged; retries and tool-loop follow-ups do not invoke it again. | `turn_id`, `task_id`, `session_id`, `platform`, `user_message`, `current_route` (`model`, `provider`, `api_mode`) | User content is exposed; no live agent, client, API key, base URL, or other credential-bearing runtime object is provided. |
 | `post_llm_call` | Observer | Successful, non-interrupted turn finalization; return ignored. | `session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform` | Full prompt, response, and history. |
 | `transform_llm_output` | Transform | Before `post_llm_call` and final delivery; first non-empty string replaces the response. | `response_text`, `session_id`, `model`, `platform` | Full final assistant text. |
 | `pre_verify` | Directive/control | At the bounded edited-code verify gate; first valid continue/block-stop directive keeps the turn going. | `session_id`, `platform`, `model`, `coding`, `attempt`, `final_response`, `changed_paths` | Draft response and changed paths. |

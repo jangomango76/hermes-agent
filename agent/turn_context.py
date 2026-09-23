@@ -1020,7 +1020,6 @@ def build_turn_context(
     from tools.skill_provenance import set_review_attended
     set_review_attended(getattr(agent, "_review_attended", False))
     agent._restore_primary_runtime()
-    _publish_runtime_main(agent)
     _refresh_mcp_tools_between_turns(agent)
 
     if isinstance(user_message, str):
@@ -1033,6 +1032,14 @@ def build_turn_context(
         persist_user_timestamp, persist_user_platform_id,
     )
     _reset_per_turn_agent_state(agent)
+    from agent.primary_turn_route import apply_primary_turn_route
+    apply_primary_turn_route(
+        agent,
+        user_message=persist_user_message if persist_user_message is not None else user_message,
+        turn_id=turn_id,
+        task_id=effective_task_id,
+    )
+    _publish_runtime_main(agent)
 
     _preview_text = summarize_user_message_for_log(user_message)
     _msg_preview = _preview_text[:80] + ("..." if len(_preview_text) > 80 else "")
