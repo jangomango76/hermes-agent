@@ -27,9 +27,11 @@ class _HostRiskVerdict:
     risk: str
     verified: bool
     provenance: str
+    turn_id: str = ""
+    session_id: str = ""
 
 
-def _host_risk_verdict() -> _HostRiskVerdict | None:
+def _host_risk_verdict(*, turn_id: str, session_id: str, user_message: Any) -> _HostRiskVerdict | None:
     """No trusted risk producer is wired to this isolated host yet."""
     return None
 
@@ -122,13 +124,15 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
     # The host currently has no trusted risk producer. Do not even discover a
     # plugin without an explicitly verified host verdict and a safe identity.
     try:
-        verdict = _host_risk_verdict()
+        session_id = getattr(agent, "session_id", "") or ""
+        verdict = _host_risk_verdict(turn_id=turn_id, session_id=session_id, user_message=user_message)
     except Exception:
         logger.warning("Host primary-turn risk verdict unavailable", exc_info=True)
         return False
     if (type(verdict) is not _HostRiskVerdict or verdict.verified is not True
             or verdict.risk != "low" or not isinstance(verdict.provenance, str)
-            or not verdict.provenance.strip()):
+            or not verdict.provenance.strip() or not turn_id or not session_id
+            or verdict.turn_id != turn_id or verdict.session_id != session_id):
         return False
     endpoint_origin = _safe_endpoint_origin(getattr(agent, "base_url", None))
     if endpoint_origin is None:

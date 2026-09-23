@@ -188,8 +188,9 @@ def test_primary_turn_route_is_applied_before_runtime_publication_and_preflight(
     """The routed model must drive the whole turn preflight, not only its API loop."""
     from agent import primary_turn_route
 
-    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", lambda: primary_turn_route._HostRiskVerdict(
+    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", lambda **facts: primary_turn_route._HostRiskVerdict(
         risk="low", verified=True, provenance="isolated-host-test-fixture",
+        turn_id=facts["turn_id"], session_id=facts["session_id"],
     ))
     agent = _FakeAgent()
     agent._primary_runtime = {"model": agent.model, "provider": agent.provider}
@@ -223,7 +224,7 @@ def test_unverified_default_turn_never_discovers_router_plugin(monkeypatch):
     import hermes_cli.plugins as plugins_mod
     from agent.primary_turn_route import _host_risk_verdict
 
-    assert _host_risk_verdict() is None
+    assert _host_risk_verdict(turn_id="t", session_id="s", user_message="unknown") is None
     agent = _FakeAgent()
     agent.reasoning_config = {"enabled": True, "effort": "high"}
     original_has_hook = plugins_mod.has_hook

@@ -15,8 +15,9 @@ def _isolated_host_risk_authority(monkeypatch):
     from agent import primary_turn_route
     monkeypatch.setattr(
         primary_turn_route, "_host_risk_verdict",
-        lambda: primary_turn_route._HostRiskVerdict(
+        lambda **facts: primary_turn_route._HostRiskVerdict(
             risk="low", verified=True, provenance="isolated-host-test-fixture",
+            turn_id=facts["turn_id"], session_id=facts["session_id"],
         ),
     )
 
@@ -49,7 +50,7 @@ def test_absent_host_verdict_never_invokes_plugin_or_switches(monkeypatch):
     from agent.primary_turn_route import apply_primary_turn_route
 
     agent = _agent()
-    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: None)
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda **_kw: None)
     monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("plugin discovered without risk"))
     monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: pytest.fail("plugin invoked without risk"))
     agent.risk_verdict = {"risk": "low", "verified": True, "provenance": "host"}
@@ -60,7 +61,7 @@ def test_absent_host_verdict_never_invokes_plugin_or_switches(monkeypatch):
 def test_forged_host_verdict_cannot_invoke_plugin(monkeypatch):
     from agent.primary_turn_route import apply_primary_turn_route
 
-    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: {
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda **_kw: {
         "risk": "low", "verified": True, "provenance": "host",
     })
     monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("unverified plugin discovery"))
@@ -70,7 +71,7 @@ def test_forged_host_verdict_cannot_invoke_plugin(monkeypatch):
 def test_unverified_host_verdict_cannot_invoke_plugin(monkeypatch):
     from agent import primary_turn_route
 
-    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda: primary_turn_route._HostRiskVerdict(
+    monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", lambda **_kw: primary_turn_route._HostRiskVerdict(
         risk="low", verified=False, provenance="isolated-host-test-fixture",
     ))
     monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("unverified plugin discovery"))
@@ -80,7 +81,7 @@ def test_unverified_host_verdict_cannot_invoke_plugin(monkeypatch):
 def test_failing_host_verdict_cannot_invoke_plugin(monkeypatch):
     from agent.primary_turn_route import apply_primary_turn_route
 
-    def failed_verdict():
+    def failed_verdict(**_kw):
         raise RuntimeError("host risk unavailable")
 
     monkeypatch.setattr("agent.primary_turn_route._host_risk_verdict", failed_verdict)
@@ -118,6 +119,45 @@ def test_host_facts_include_original_effort_safe_origin_and_risk_provenance(monk
         "risk": {"risk": "low", "verified": True, "provenance": "isolated-host-test-fixture"},
     }
     assert "secret-for-a" not in repr(seen)
+
+
+def test_host_risk_verdict_is_bound_to_this_turn_before_plugin_invocation(monkeypatch):
+    from agent import primary_turn_route
+
+    seen = []
+    def classify(*, turn_id, session_id, user_message):
+        seen.append((turn_id, session_id, user_message))
+        return primary_turn_route._HostRiskVerdict(
+            risk="low", verified=True, provenance="isolated-host-test-fixture",
+            turn_id=turn_id, session_id=session_id,
+        )
+
+    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", classify)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [None])
+    assert not primary_turn_route.apply_primary_turn_route(
+        _agent(), user_message="current turn", turn_id="turn-current", task_id="task-current",
+    )
+    assert seen == [("turn-current", "session-a", "current turn")]
+
+
+def test_stale_host_risk_verdict_cannot_authorize_a_new_turn(monkeypatch):
+    from agent import primary_turn_route
+
+    seen = []
+    def stale_verdict(**facts):
+        seen.append((facts["turn_id"], facts["session_id"]))
+        return primary_turn_route._HostRiskVerdict(
+            risk="low", verified=True, provenance="isolated-host-test-fixture",
+            turn_id="old-turn", session_id="session-a",
+        )
+
+    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", stale_verdict)
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _: pytest.fail("stale verdict discovered plugin"))
+    assert not primary_turn_route.apply_primary_turn_route(
+        _agent(), user_message="new turn", turn_id="new-turn", task_id="task-new",
+    )
+    assert seen == [("new-turn", "session-a")]
 
 
 def test_invalid_route_decision_is_rejected_without_switching(monkeypatch):

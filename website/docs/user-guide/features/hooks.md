@@ -414,8 +414,9 @@ def register(ctx):
     ctx.register_hook("pre_primary_turn_route", choose_route)
 ```
 
-The callback is **not invoked** without a verified, low-risk host verdict.
-There is no trusted risk producer connected yet, so this hook currently leaves
+The callback is **not invoked** without a verified, low-risk host verdict
+bound to this exact turn and session. A stale verdict cannot authorize a later
+turn. There is no trusted risk producer connected yet, so this hook currently leaves
 the original primary route untouched in production. A plugin's claim, prompt
 text, or agent attribute cannot supply a host verdict. The isolated test host
 uses an explicit test-only verdict to exercise the callback and restoration.
