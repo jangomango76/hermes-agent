@@ -109,6 +109,29 @@ def test_unconfigured_destination_is_rejected_without_reusing_old_key(monkeypatc
     assert (agent.model, agent.provider, agent.api_key) == ("model-a", "provider-a", "key-for-a")
 
 
+def test_partially_failed_switch_cannot_leave_untracked_temporary_runtime(monkeypatch):
+    """If the switcher raises after mutation, restore before using the old route."""
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    agent._primary_runtime.update(provider="provider-a", base_url="https://a.example/v1", api_mode="chat_completions")
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [{"model": "model-b", "provider": "provider-b"}])
+    calls = []
+
+    def switch(fake_agent, **kwargs):
+        calls.append(kwargs["new_model"])
+        fake_agent.model, fake_agent.provider = kwargs["new_model"], kwargs["new_provider"]
+        if len(calls) == 1:
+            raise RuntimeError("partial switch")
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", switch)
+    assert not apply_primary_turn_route(agent, user_message="route", turn_id="turn-a", task_id="task-a")
+    assert calls == ["model-b", "model-a"]
+    assert (agent.model, agent.provider) == ("model-a", "provider-a")
+    assert agent._primary_turn_route_state is None
+
+
 def test_user_plugin_routes_with_safe_context_and_host_applies_effort(monkeypatch, tmp_path):
     """A discovered user plugin can route, but only receives the documented data context."""
     import hermes_cli.plugins as plugins_mod
@@ -177,6 +200,30 @@ def test_temporary_route_restores_original_runtime_after_accounting(monkeypatch)
     assert restore_primary_turn_route(agent) is True
     assert (agent.model, agent.provider, agent.reasoning_config["effort"]) == ("model-a", "provider-a", "medium")
     assert [item[:2] for item in observed] == [("model-b", "provider-b"), ("model-a", "provider-a")]
+
+
+def test_route_effort_remains_in_primary_snapshot_for_midturn_fallback(monkeypatch):
+    """Fallback restoration in the same turn must not erase the plugin's effort."""
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda *_a, **_kw: [{"model": "model-b", "provider": "provider-b", "reasoning_effort": "high"}],
+    )
+
+    def switch(fake_agent, **kwargs):
+        fake_agent.model, fake_agent.provider = kwargs["new_model"], kwargs["new_provider"]
+        fake_agent._primary_runtime = {
+            "model": fake_agent.model, "provider": fake_agent.provider,
+            "reasoning_config": {"enabled": True, "effort": "medium"},
+        }
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", switch)
+    assert apply_primary_turn_route(agent, user_message="route", turn_id="turn-a", task_id="task-a")
+    assert agent._primary_runtime["reasoning_config"] == agent.reasoning_config
+    assert agent._primary_runtime["reasoning_config"]["effort"] == "high"
 
 
 def test_restored_route_republishes_original_auxiliary_main(monkeypatch):
@@ -255,6 +302,43 @@ def test_real_turn_routes_once_records_b_usage_and_restores_a(monkeypatch, tmp_p
     assert (agent.model, agent.provider) == ("model-a", "provider-a")
     assert agent._cached_system_prompt == "You are helpful."
     assert switched == [("model-b", "provider-b"), ("model-a", "provider-a")]
+
+
+def test_real_switcher_rebuilds_client_and_context_for_routed_model(monkeypatch):
+    """The route seam uses the production switcher, not merely a model-label change."""
+    from agent.primary_turn_route import apply_primary_turn_route, restore_primary_turn_route
+    from run_agent import AIAgent
+
+    client_a, client_b = MagicMock(), MagicMock()
+    current = {}
+
+    def create_client(**_kwargs):
+        return client_b if current.get("agent") and current["agent"].model == "model-b" else client_a
+
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda *_args, **_kw: [{"model": "model-b", "provider": "custom"}],
+    )
+    with (
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI", side_effect=create_client),
+        patch("agent.context_compressor.get_model_context_length", return_value=200_000),
+        patch("agent.model_metadata.get_model_context_length", return_value=200_000),
+    ):
+        agent = AIAgent(
+            api_key="test-key", base_url="https://a.example/v1", provider="custom",
+            model="model-a", quiet_mode=True, skip_context_files=True, skip_memory=True,
+        )
+        current["agent"] = agent
+        agent.client = client_a
+        assert apply_primary_turn_route(agent, user_message="route", turn_id="turn-a", task_id="task-a")
+        assert (agent.model, agent.client) == ("model-b", client_b)
+        assert agent.context_compressor.model == "model-b"
+        assert restore_primary_turn_route(agent)
+        assert (agent.model, agent.client) == ("model-a", client_a)
+        assert agent.context_compressor.model == "model-a"
 
 
 def test_failed_restore_never_starts_next_turn_on_previous_temporary_route(monkeypatch):

@@ -144,18 +144,26 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
         if crosses_endpoint:
             # Empty-key local endpoints must not inherit the previous provider's key.
             agent.api_key = ""
+        agent._primary_turn_route_state = state
         switch_model(
             agent, new_model=parsed.model, new_provider=parsed.provider,
             api_key=new_key or "", base_url=resolved_base_url, api_mode=parsed.api_mode,
         )
         if effort is not None:
             agent.reasoning_config = effort
-        agent._primary_turn_route_state = state
+            # Fallback restoration reads the acting primary snapshot mid-turn.
+            # Keep the override there too, not only on the live agent.
+            agent._primary_runtime["reasoning_config"] = copy.deepcopy(effort)
         return True
     except Exception:
-        if crosses_endpoint and "old_key" in locals():
-            agent.api_key = old_key
         logger.warning("Ignoring failed pre_primary_turn_route decision", exc_info=True)
+        if getattr(agent, "_primary_turn_route_state", None) is state:
+            if not restore_primary_turn_route(agent):
+                # Retain the state and stop this turn. Continuing could send A's
+                # credentials to a partially activated B endpoint.
+                raise RuntimeError("Cannot start turn after failed temporary route restoration") from None
+            if crosses_endpoint:
+                agent.api_key = old_key
         return False
 
 

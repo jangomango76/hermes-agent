@@ -406,7 +406,7 @@ and first primary request. Register it in a regular enabled Python plugin:
 
 ```python
 def choose_route(*, user_message, current_route, turn_id, **kwargs):
-    if isinstance(user_message, str) and user_message.startswith("/research "):
+    if isinstance(user_message, str) and user_message.startswith("Research:"):
         return {"model": "research-model", "provider": "openrouter", "reasoning_effort": "high"}
     return None  # Keep the configured primary route.
 
