@@ -116,6 +116,18 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
         if effort is None:
             logger.warning("Ignoring invalid pre_primary_turn_route reasoning_effort")
             return False
+        # The generic request builder cannot project effort for an unknown
+        # provider profile. Do not silently route a requested high-effort turn
+        # to a model whose wire request would omit the effort altogether.
+        try:
+            from providers import get_provider_profile
+            profile = get_provider_profile(parsed.provider)
+        except Exception:
+            logger.warning("Could not resolve pre_primary_turn_route effort provider profile", exc_info=True)
+            return False
+        if profile is None:
+            logger.warning("Ignoring pre_primary_turn_route effort for unknown provider profile")
+            return False
     state = _capture_route_state(agent)
     # The canonical switcher retains the old API key when no new one is supplied.
     # Resolve a destination credential before crossing a provider/endpoint boundary;

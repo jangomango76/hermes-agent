@@ -148,7 +148,7 @@ def test_user_plugin_routes_with_safe_context_and_host_applies_effort(monkeypatc
         "        assert 'agent' not in kw\n"
         "        assert kw['current_route']['model'] == 'model-a'\n"
         "        assert kw['user_message'] == 'please route'\n"
-        "        return {'model': 'model-b', 'provider': 'provider-b', 'reasoning_effort': 'high'}\n"
+        "        return {'model': 'model-b', 'provider': 'custom', 'reasoning_effort': 'high'}\n"
         "    ctx.register_hook('pre_primary_turn_route', route)\n",
         encoding="utf-8",
     )
@@ -169,7 +169,7 @@ def test_user_plugin_routes_with_safe_context_and_host_applies_effort(monkeypatc
     monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", switch)
 
     assert apply_primary_turn_route(agent, user_message="please route", turn_id="turn-a", task_id="task-a") is True
-    assert calls == [{"new_model": "model-b", "new_provider": "provider-b", "api_key": "key-for-b", "base_url": "https://b.example/v1", "api_mode": ""}]
+    assert calls == [{"new_model": "model-b", "new_provider": "custom", "api_key": "key-for-b", "base_url": "https://b.example/v1", "api_mode": ""}]
     assert agent.reasoning_config == {"enabled": True, "effort": "high"}
 
 
@@ -185,7 +185,7 @@ def test_temporary_route_restores_original_runtime_after_accounting(monkeypatch)
     monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
     monkeypatch.setattr(
         "hermes_cli.plugins.invoke_hook",
-        lambda *_args, **_kwargs: [{"model": "model-b", "provider": "provider-b", "reasoning_effort": "high"}],
+        lambda *_args, **_kwargs: [{"model": "model-b", "provider": "custom", "reasoning_effort": "high"}],
     )
     observed = []
 
@@ -198,10 +198,10 @@ def test_temporary_route_restores_original_runtime_after_accounting(monkeypatch)
 
     assert apply_primary_turn_route(agent, user_message="route", turn_id="turn-a", task_id="task-a") is True
     # Usage accounting runs while the routed identity is still active.
-    assert (agent.model, agent.provider, agent.reasoning_config["effort"]) == ("model-b", "provider-b", "high")
+    assert (agent.model, agent.provider, agent.reasoning_config["effort"]) == ("model-b", "custom", "high")
     assert restore_primary_turn_route(agent) is True
     assert (agent.model, agent.provider, agent.reasoning_config["effort"]) == ("model-a", "provider-a", "medium")
-    assert [item[:2] for item in observed] == [("model-b", "provider-b"), ("model-a", "provider-a")]
+    assert [item[:2] for item in observed] == [("model-b", "custom"), ("model-a", "provider-a")]
 
 
 def test_route_effort_remains_in_primary_snapshot_for_midturn_fallback(monkeypatch):
@@ -212,7 +212,7 @@ def test_route_effort_remains_in_primary_snapshot_for_midturn_fallback(monkeypat
     monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
     monkeypatch.setattr(
         "hermes_cli.plugins.invoke_hook",
-        lambda *_a, **_kw: [{"model": "model-b", "provider": "provider-b", "reasoning_effort": "high"}],
+        lambda *_a, **_kw: [{"model": "model-b", "provider": "custom", "reasoning_effort": "high"}],
     )
 
     def switch(fake_agent, **kwargs):
@@ -499,3 +499,102 @@ def test_plugin_endpoint_override_cannot_redirect_destination_credential(
     assert switches == []
     assert agent.api_key == "key-for-a"
     assert seen == [None]
+
+
+def test_nonstream_provider_wire_and_exact_turn_failure_fallback(monkeypatch, tmp_path):
+    """A selected turn uses B's client; failed/nonselect turns use A with original effort."""
+    import hermes_cli.plugins as plugins_mod
+    from run_agent import AIAgent
+
+    plugin_dir = tmp_path / "plugins" / "route_wire"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text("name: route_wire\n", encoding="utf-8")
+    (plugin_dir / "__init__.py").write_text(
+        "def register(ctx):\n"
+        "    def route(user_message, **kw):\n"
+        "        if user_message == 'failure':\n"
+        "            raise RuntimeError('plugin unavailable')\n"
+        "        if user_message == 'selected':\n"
+        "            return {'model': 'model-b', 'provider': 'custom', "
+        "'base_url': 'https://b.example/v1', 'reasoning_effort': 'high'}\n"
+        "        if user_message == 'unsupported':\n"
+        "            return {'model': 'model-b', 'provider': 'route-b', "
+        "'base_url': 'https://b.example/v1', 'reasoning_effort': 'high'}\n"
+        "        return None\n"
+        "    ctx.register_hook('pre_primary_turn_route', route)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["route_wire"]}}), encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    plugins_mod._plugin_manager = plugins_mod.PluginManager()
+    monkeypatch.setattr(
+        "agent.auxiliary_client.resolve_provider_client",
+        lambda provider, model, **kw: (
+            SimpleNamespace(base_url="https://b.example/v1", api_key="key-for-b"), model,
+        ),
+    )
+    wire = []
+
+    class FakeClient:
+        def __init__(self, kwargs):
+            self.kwargs = dict(kwargs)
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def create(self, **kwargs):
+            wire.append((self.kwargs, kwargs))
+            return SimpleNamespace(
+                id="offline", model=kwargs["model"],
+                choices=[SimpleNamespace(message=SimpleNamespace(content="answer", tool_calls=None), finish_reason="stop")],
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+            )
+
+        def close(self):
+            pass
+
+    with (
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI", side_effect=lambda **kw: FakeClient(kw)),
+        patch.object(AIAgent, "_create_openai_client", autospec=True,
+                     side_effect=lambda _self, kw, **_opts: FakeClient(kw)),
+    ):
+        agent = AIAgent(
+            api_key="key-for-a", base_url="https://a.example/v1", provider="custom",
+            model="model-a", quiet_mode=True, skip_context_files=True, skip_memory=True,
+        )
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        agent._primary_runtime["reasoning_config"] = dict(agent.reasoning_config)
+        agent._cached_system_prompt = "You are helpful."
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._disable_streaming = True
+        agent.tools = [{"type": "function", "function": {
+            "name": "fake_lookup", "description": "offline test tool",
+            "parameters": {"type": "object", "properties": {}},
+        }}]
+        for prompt, expected_model, expected_effort in (
+            ("selected", "model-b", "high"),
+            ("failure", "model-a", "medium"),
+            ("nonselect", "model-a", "medium"),
+            ("unsupported", "model-a", "medium"),
+        ):
+            result = agent.run_conversation(prompt)
+            assert result["final_response"] == "answer"
+            assert result["model"] == expected_model
+            client, request = wire[-1]
+            assert (request["model"], request.get("reasoning_effort")) == (expected_model, expected_effort)
+            assert "stream" not in request
+            assert request["tools"] == agent.tools
+            assert (client["api_key"], client["base_url"]) == (
+                ("key-for-b", "https://b.example/v1") if expected_model == "model-b"
+                else ("key-for-a", "https://a.example/v1")
+            )
+            assert (agent.model, agent.provider, agent.base_url, agent.api_key) == (
+                "model-a", "custom", "https://a.example/v1", "key-for-a",
+            )
+            assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+            assert agent._primary_turn_route_state is None
+    assert len(wire) == 4
+    assert agent.session_total_tokens == 72

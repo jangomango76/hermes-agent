@@ -424,7 +424,11 @@ the plugin never supplies an API key. An optional `base_url` must match the
 configured destination endpoint; it cannot redirect a provider credential to
 an arbitrary host. An omitted `base_url` uses the configured provider route,
 while a same-provider model switch keeps the current endpoint.
-Invalid or unresolvable decisions are ignored (the old route is used).
+Invalid or unresolvable decisions are ignored (the old route is used). An
+explicit `reasoning_effort` also requires a recognized provider profile; for
+unknown providers Hermes cannot map the effort to a wire field and keeps the
+original route rather than silently dropping it. This does not prove a
+provider accepts the requested effort or model without a live API call.
 
 The first non-`None` plugin result wins; later results cannot override it.
 The callback is timeout-bounded by `plugins.hook_callback_timeout` and runs once
