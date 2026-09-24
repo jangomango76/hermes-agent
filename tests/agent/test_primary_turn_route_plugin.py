@@ -591,6 +591,152 @@ def test_streaming_provider_boundary_routes_effort_tools_usage_then_restores(mon
     ]
 
 
+def test_codex_stream_wire_effort_usage_and_next_turn_restoration(monkeypatch, tmp_path):
+    """An isolated Codex Responses route must switch the actual SDK request, not just labels."""
+    import sqlite3
+    import hermes_cli.plugins as plugins_mod
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    plugin_dir = tmp_path / "plugins" / "codex_route"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text("name: codex_route\n", encoding="utf-8")
+    (plugin_dir / "__init__.py").write_text(
+        "def register(ctx):\n"
+        "    def route(user_message, **kw):\n"
+        "        if user_message == 'first':\n"
+        "            return {'model': 'fixture-codex-b', 'provider': 'openai-codex', "
+        "'reasoning_effort': 'high'}\n"
+        "    ctx.register_hook('pre_primary_turn_route', route)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({
+            "plugins": {"enabled": ["codex_route"]},
+            "title_generation": {"model_upgrade_enabled": False},
+        }), encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    plugins_mod._plugin_manager = plugins_mod.PluginManager()
+    wire = []
+
+    class FakeCodexClient:
+        def __init__(self, kwargs):
+            self.settings = dict(kwargs)
+            self.responses = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            import copy
+            wire.append((copy.deepcopy(self.settings), copy.deepcopy(kwargs)))
+            assert kwargs["stream"] is True
+            response = SimpleNamespace(
+                id="resp_offline", model=kwargs["model"], status="completed",
+                output=[SimpleNamespace(type="message", phase="final_answer", status="completed",
+                    content=[SimpleNamespace(type="output_text", text="answer")])],
+                usage=SimpleNamespace(input_tokens=11, output_tokens=7, total_tokens=18),
+            )
+            return iter([
+                SimpleNamespace(type="response.output_item.done", item=response.output[0]),
+                SimpleNamespace(type="response.completed", response=response),
+            ])
+
+        def close(self):
+            pass
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    with (
+        patch("model_tools.get_tool_definitions", return_value=[{"type": "function", "function": {
+            "name": "fake_lookup", "description": "offline tool",
+            "parameters": {"type": "object", "properties": {}},
+        }}]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI", side_effect=lambda **kw: FakeCodexClient(kw)),
+        patch.object(AIAgent, "_create_openai_client", autospec=True,
+                     side_effect=lambda _self, kw, **_opts: FakeCodexClient(kw)),
+    ):
+        agent = AIAgent(
+            api_key="fixture-token", base_url="https://chatgpt.com/backend-api/codex",
+            provider="openai-codex", api_mode="codex_responses", model="fixture-codex-a",
+            quiet_mode=True, skip_context_files=True, skip_memory=True, session_db=db,
+        )
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        agent._primary_runtime["reasoning_config"] = dict(agent.reasoning_config)
+        agent._cached_system_prompt = "You are helpful."
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent.tools = [{"type": "function", "function": {
+            "name": "fake_lookup", "description": "offline tool",
+            "parameters": {"type": "object", "properties": {}},
+        }}]
+        for prompt, expected in (("first", "fixture-codex-b"), ("second", "fixture-codex-a")):
+            result = agent.run_conversation(prompt, stream_callback=lambda *_a, **_kw: None)
+            assert result["final_response"] == "answer"
+            assert result["model"] == expected
+            assert agent.tools[0]["function"]["name"] == "fake_lookup"
+            assert (agent.model, agent.provider, agent.api_mode) == (
+                "fixture-codex-a", "openai-codex", "codex_responses",
+            )
+            assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
+    assert len(wire) == 2
+    assert all(settings["base_url"] == "https://chatgpt.com/backend-api/codex"
+               and settings["api_key"] == "fixture-token" for settings, _ in wire)
+    assert [request["model"] for _, request in wire] == ["fixture-codex-b", "fixture-codex-a"]
+    assert [request["reasoning"]["effort"] for _, request in wire] == ["high", "medium"]
+    assert all(request["stream"] is True for _, request in wire)
+    # The SDK transform bypass puts JSON bulk fields in extra_body; the SDK merges
+    # them back into the outbound Responses JSON body after its typed transform.
+    assert all(request["extra_body"]["tools"][0]["name"] == "fake_lookup" for _, request in wire)
+    assert all(request["extra_body"]["input"] for _, request in wire)
+    assert agent.session_total_tokens == 36
+    with sqlite3.connect(db.db_path) as conn:
+        rows = conn.execute(
+            "SELECT model, billing_provider, billing_mode, api_call_count, input_tokens, output_tokens "
+            "FROM session_model_usage WHERE session_id=? ORDER BY model", (agent.session_id,),
+        ).fetchall()
+    assert rows == [
+        ("fixture-codex-a", "openai-codex", "subscription_included", 1, 11, 7),
+        ("fixture-codex-b", "openai-codex", "subscription_included", 1, 11, 7),
+    ]
+
+
+def test_codex_sdk_stream_serializes_routed_bulk_fields_on_http_wire():
+    """Use the real SDK serializer but a local fake HTTP transport; never contact Codex."""
+    import json
+    import httpx
+    from openai import OpenAI
+    from agent.sdk_transform_bypass import bypass_sdk_request_transform
+
+    bodies = []
+    def respond(request):
+        assert request.url.path.endswith("/responses")
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
+            'event: response.completed\n'
+            'data: {"type":"response.completed","response":{"id":"resp_fixture","status":"completed"}}\n\n'
+            'data: [DONE]\n\n'
+        ))
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        client = OpenAI(api_key="fixture-token", base_url="https://fixture.invalid/v1", http_client=http_client)
+        stream = client.responses.create(**bypass_sdk_request_transform({
+            "model": "fixture-codex-b", "instructions": "offline", "input": [{"role": "user", "content": "first"}],
+            "tools": [{"type": "function", "name": "fake_lookup", "description": "offline tool",
+                       "parameters": {"type": "object", "properties": {}}, "strict": False}],
+            "reasoning": {"effort": "high"}, "store": False, "stream": True,
+        }))
+        assert [event.type for event in stream] == ["response.completed"]
+        stream.close()
+        client.close()
+
+    assert bodies == [{
+        "model": "fixture-codex-b", "instructions": "offline", "input": [{"role": "user", "content": "first"}],
+        "tools": [{"type": "function", "name": "fake_lookup", "description": "offline tool",
+                   "parameters": {"type": "object", "properties": {}}, "strict": False}],
+        "reasoning": {"effort": "high"}, "store": False, "stream": True,
+    }]
+
+
 def test_plugin_endpoint_override_cannot_redirect_destination_credential(
     monkeypatch, tmp_path, _stub_destination_resolution,
 ):
