@@ -354,6 +354,37 @@ def test_route_effort_remains_in_primary_snapshot_for_midturn_fallback(monkeypat
     assert agent._primary_runtime["reasoning_config"] == agent.reasoning_config
     assert agent._primary_runtime["reasoning_config"]["effort"] == "high"
 
+def test_temporary_route_disables_unrelated_fallback_and_restores_it(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route, restore_primary_turn_route
+
+    agent = _agent()
+    agent._primary_runtime.update(provider="provider-a", base_url="https://a.example/v1", api_mode="chat_completions")
+    chain = [{"model": "other-model", "provider": "provider-c"}]
+    agent._fallback_chain = chain
+    agent._fallback_model = chain[0]
+    agent._fallback_index = 1
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [
+        {"model": "model-b", "provider": "provider-b"},
+    ])
+
+    def switch(fake_agent, **kwargs):
+        fake_agent.model, fake_agent.provider = kwargs["new_model"], kwargs["new_provider"]
+
+    monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", switch)
+    assert apply_primary_turn_route(agent, user_message="route", turn_id="turn-a", task_id="task-a")
+    assert (agent._fallback_chain, agent._fallback_model, agent._fallback_index) == ([], None, 0)
+    assert restore_primary_turn_route(agent)
+    assert (agent._fallback_chain, agent._fallback_model, agent._fallback_index) == (chain, chain[0], 1)
+
+def test_temporary_route_rejects_native_child_before_construction(monkeypatch):
+    from agent.primary_turn_route import _PrimaryTurnRouteState
+    from tools.delegate_tool import _build_child_agent
+
+    parent = SimpleNamespace(_primary_turn_route_state=_PrimaryTurnRouteState({}, None, None, {}))
+    with pytest.raises(ValueError, match="Native delegation is unavailable"):
+        _build_child_agent(0, "child goal", None, None, None, 1, 1, parent)
+
 
 def test_restored_route_republishes_original_auxiliary_main(monkeypatch):
     """Auxiliary routing outside the turn must not see its temporary provider as main."""

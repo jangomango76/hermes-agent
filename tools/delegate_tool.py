@@ -181,6 +181,12 @@ def _build_child_agent(
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair."""
+    # A temporary plugin route is not a child-runtime lease. Delegation config
+    # can otherwise send the child's goal/context to a provider outside the
+    # selected turn's policy, even when the parent fallback chain is empty.
+    from agent.primary_turn_route import _PrimaryTurnRouteState
+    if isinstance(getattr(parent_agent, "_primary_turn_route_state", None), _PrimaryTurnRouteState):
+        raise ValueError("Native delegation is unavailable during a temporary primary route")
     import uuid as _uuid
     from run_agent import AIAgent
     from agent.delegation_context import delegated_child_context

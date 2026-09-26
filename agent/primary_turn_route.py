@@ -231,6 +231,13 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
             # Fallback restoration reads the acting primary snapshot mid-turn.
             # Keep the override there too, not only on the live agent.
             agent._primary_runtime["reasoning_config"] = copy.deepcopy(effort)
+        # The ordinary primary fallback chain belongs to the original route, not
+        # the plugin's temporary destination. An error on B must not disclose the
+        # turn to an unrelated configured fallback provider. The snapshot above
+        # restores the chain (and its cursor) after this turn.
+        agent._fallback_chain = []
+        agent._fallback_model = None
+        agent._fallback_index = 0
         return True
     except Exception:
         logger.warning("Ignoring failed pre_primary_turn_route decision", exc_info=True)

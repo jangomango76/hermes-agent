@@ -445,8 +445,12 @@ provider accepts the requested effort or model without a live API call.
 The first non-`None` plugin result wins; later results cannot override it.
 The callback is timeout-bounded by `plugins.hook_callback_timeout` and runs once
 per **user turn**, not on retries or tool-loop calls. Hermes applies model,
-transport, context window, and effort through the host switcher. The temporary
-route remains active for provider calls and usage accounting, then is restored
+transport, context window, and effort through the host switcher. The original
+primary fallback chain is disabled during the temporary route and restored
+afterward; native child construction is rejected during such a turn because
+there is no inherited child-route lease. Auxiliary calls have separate fallback
+policy and are not covered by this experimental seam. The temporary route
+remains active for primary provider calls and usage accounting, then is restored
 even after an exception or interruption. A failed restore blocks the next turn
 rather than sending a request on a stale route. This changes the runtime route,
 not the persisted conversation history or a session's frozen system guidance.
