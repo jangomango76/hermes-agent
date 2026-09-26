@@ -17,7 +17,7 @@ def _isolated_host_risk_authority(monkeypatch):
         primary_turn_route, "_host_risk_verdict",
         lambda **facts: primary_turn_route._HostRiskVerdict(
             risk="low", verified=True, provenance="isolated-host-test-fixture",
-            turn_id=facts["turn_id"], session_id=facts["session_id"],
+            turn_id=facts["turn_id"], session_id=facts["session_id"], category="default",
         ),
     )
 
@@ -129,7 +129,7 @@ def test_host_risk_verdict_is_bound_to_this_turn_before_plugin_invocation(monkey
         seen.append((turn_id, session_id, user_message))
         return primary_turn_route._HostRiskVerdict(
             risk="low", verified=True, provenance="isolated-host-test-fixture",
-            turn_id=turn_id, session_id=session_id,
+            turn_id=turn_id, session_id=session_id, category="default",
         )
 
     monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", classify)
@@ -158,6 +158,34 @@ def test_stale_host_risk_verdict_cannot_authorize_a_new_turn(monkeypatch):
         _agent(), user_message="new turn", turn_id="new-turn", task_id="task-new",
     )
     assert seen == [("new-turn", "session-a")]
+
+
+@pytest.mark.parametrize("category", ["planning", "exception", "high-risk", "unknown", "computer_use"])
+def test_non_default_category_never_discovers_route_plugin(monkeypatch, category):
+    from agent import primary_turn_route
+
+    monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", lambda **facts: primary_turn_route._HostRiskVerdict(
+        risk="low", verified=True, provenance="isolated-host-test-fixture",
+        turn_id=facts["turn_id"], session_id=facts["session_id"], category=category,
+    ))
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: pytest.fail("category bypassed host gate"))
+    assert not primary_turn_route.apply_primary_turn_route(
+        _agent(), user_message="route", turn_id="current-turn", task_id="task",
+    )
+
+
+def test_multiple_plugin_decisions_cannot_select_by_registration_order(monkeypatch):
+    from agent.primary_turn_route import apply_primary_turn_route
+
+    agent = _agent()
+    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda *_a: True)
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [
+        {"model": "model-b", "provider": "provider-b"},
+        {"model": "model-c", "provider": "provider-c"},
+    ])
+    monkeypatch.setattr("agent.agent_runtime_helpers.switch_model", lambda *_a, **_kw: pytest.fail("ambiguous route switched"))
+    assert not apply_primary_turn_route(agent, user_message="route", turn_id="current-turn", task_id="task")
+    assert agent.model == "model-a"
 
 
 def test_invalid_route_decision_is_rejected_without_switching(monkeypatch):

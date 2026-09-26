@@ -29,6 +29,7 @@ class _HostRiskVerdict:
     provenance: str
     turn_id: str = ""
     session_id: str = ""
+    category: str = "unknown"
 
 
 def _host_risk_verdict(*, turn_id: str, session_id: str, user_message: Any) -> _HostRiskVerdict | None:
@@ -132,7 +133,8 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
     if (type(verdict) is not _HostRiskVerdict or verdict.verified is not True
             or verdict.risk != "low" or not isinstance(verdict.provenance, str)
             or not verdict.provenance.strip() or not turn_id or not session_id
-            or verdict.turn_id != turn_id or verdict.session_id != session_id):
+            or verdict.turn_id != turn_id or verdict.session_id != session_id
+            or verdict.category != "default"):
         return False
     endpoint_origin = _safe_endpoint_origin(getattr(agent, "base_url", None))
     if endpoint_origin is None:
@@ -164,7 +166,14 @@ def apply_primary_turn_route(agent: Any, *, user_message: Any, turn_id: str, tas
     except Exception:
         logger.warning("pre-primary-turn route plugin dispatch failed", exc_info=True)
         return False
-    decision = next((item for item in results if item is not None), None)
+    # Conflicting plugins must not gain route authority through registration
+    # order. A host policy/lease must own target selection before this hook can
+    # be activated outside isolated tests.
+    decisions = [item for item in results if item is not None]
+    if len(decisions) > 1:
+        logger.warning("Ignoring ambiguous pre_primary_turn_route decisions")
+        return False
+    decision = decisions[0] if decisions else None
     parsed = _route_decision(decision)
     if parsed is None:
         if decision is not None:

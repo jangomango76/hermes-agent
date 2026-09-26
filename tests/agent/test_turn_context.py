@@ -190,7 +190,7 @@ def test_primary_turn_route_is_applied_before_runtime_publication_and_preflight(
 
     monkeypatch.setattr(primary_turn_route, "_host_risk_verdict", lambda **facts: primary_turn_route._HostRiskVerdict(
         risk="low", verified=True, provenance="isolated-host-test-fixture",
-        turn_id=facts["turn_id"], session_id=facts["session_id"],
+        turn_id=facts["turn_id"], session_id=facts["session_id"], category="default",
     ))
     agent = _FakeAgent()
     agent._primary_runtime = {"model": agent.model, "provider": agent.provider}
