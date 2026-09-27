@@ -87,3 +87,32 @@ def test_buildable_pyproject_member_keeps_its_declared_name(tmp_path):
     member = _workspace_member(plugin, root, identity=plugin)
     assert (member / "pyproject.toml").read_text(encoding="utf-8") == (
         plugin / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_buildable_member_excludes_developer_dependencies_from_runtime_snapshot(tmp_path):
+    """uv locks every member extra/group, even when none is selected for sync."""
+    import tomllib
+    from pm.workspace import _workspace_member
+
+    plugin = tmp_path / "plugins" / "voice"
+    plugin.mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname="voice"\nversion="1.0"\n'
+        'dependencies=["httpx>=0.27"]\n'
+        '[project.optional-dependencies]\n'
+        'audio=["sounddevice>=0.4"]\n'
+        'dev=["ruff==0.16.7"]\n'
+        '[dependency-groups]\ndev=["pytest>=8", "ruff==0.16.7"]\n'
+        '[tool.uv]\ndefault-groups=["dev"]\n'
+        '[build-system]\nrequires=["setuptools>=61"]\nbuild-backend="setuptools.build_meta"\n'
+    )
+    root = tmp_path / "generation"
+    root.mkdir()
+    member = _workspace_member(plugin, root, identity=plugin)
+    project = tomllib.loads((member / "pyproject.toml").read_text())
+
+    assert project["project"]["dependencies"] == ["httpx>=0.27"]
+    assert project["project"]["optional-dependencies"] == {"audio": ["sounddevice>=0.4"]}
+    assert "dependency-groups" not in project
+    assert "default-groups" not in project.get("tool", {}).get("uv", {})
+    assert "dev" in tomllib.loads((plugin / "pyproject.toml").read_text())["project"]["optional-dependencies"]

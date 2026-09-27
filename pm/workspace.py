@@ -269,6 +269,21 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path) -> Path:
         changed = declaration.install_requirements != declaration.requirements
         if changed:
             document["project"]["dependencies"] = list(declaration.install_requirements)
+        # uv resolves ALL member extras and dependency groups while locking, even
+        # when sync does not install them. Plugin development pins must not veto a
+        # runtime installation (e.g. core and plugin pin different ruff versions).
+        optional = document.get("project", {}).get("optional-dependencies", {})
+        for extra in ("dev", "test", "tests"):
+            if extra in optional:
+                del optional[extra]
+                changed = True
+        if "dependency-groups" in document:
+            del document["dependency-groups"]
+            changed = True
+        uv_settings = document.get("tool", {}).get("uv", {})
+        if "default-groups" in uv_settings:
+            del uv_settings["default-groups"]
+            changed = True
         for sources in document.get("tool", {}).get("uv", {}).get("sources", {}).values():
             for spec in sources if isinstance(sources, list) else [sources]:
                 if not isinstance(spec, dict) or "path" not in spec:
